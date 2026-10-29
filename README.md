@@ -1,8 +1,8 @@
-# Typeless Alt — macOS 雙後端語音輸入 MVP
+# Typeless Alt — macOS 語音輸入 MVP（OpenAI／Groq + Cloudflare／ChatGPT plan）
 
 原生 Swift / AppKit menubar app，macOS 13+；Apple Silicon 可直接編譯，無外部 Swift 套件、無需付費 Apple Developer 帳戶。預設 **Control+Option+D**：按一次錄音，再按一次停止 → 轉錄 → 潤飾 → 在原欄位貼上。支援廣東話／繁體中文、English 及混合輸入，移除口頭贅詞、修正自我更正、簡單列表排版；Mail 較正式、Messages 較口語，其餘保留原語氣。
 
-**本機 app，不是離線 AI**：OpenAI 模式將音訊及逐字稿送到 OpenAI；groq-cf 將音訊送到 Groq、逐字稿送到 Cloudflare（或你指定的 Worker）。無自建同步服務；歷史預設關閉。請只輸入願意交予所選服務處理的內容。
+**本機 app，不是離線 AI**：OpenAI 模式將音訊及逐字稿送到 OpenAI；groq-cf 將音訊送到 Groq、逐字稿送到 Cloudflare（或你指定的 Worker）；chatgpt-plan 將音訊送到所選 STT 服務（預設 Groq）、逐字稿送到 OpenAI Responses。無自建同步服務；歷史預設關閉。請只輸入願意交予所選服務處理的內容。
 
 ## 1. 編譯／啟動
 
@@ -19,7 +19,7 @@ cd typeless-alt
 
 ## 2A. OpenAI（預設）
 
-**ChatGPT Plus 訂閱 ≠ OpenAI API quota。** 需要在 [platform.openai.com](https://platform.openai.com/api-keys) 建立自己的 API key，並在該 OpenAI 帳戶設定 API billing／額度；此程式不使用 ChatGPT 網頁登入或訂閱額度。
+**API key 路徑使用獨立 OpenAI API billing；ChatGPT 訂閱不會自動變成 API key 額度。** 需要在 [platform.openai.com](https://platform.openai.com/api-keys) 建立自己的 API key，並在該 OpenAI 帳戶設定 API billing／額度；想使用 ChatGPT 計劃的合資格 Responses 額度，請改用下面的 `chatgpt-plan`。
 
 在 zsh 安全輸入，避免將 key 寫入 shell history：
 
@@ -81,6 +81,31 @@ export CF_WORKER_TOKEN
 
 `CF_WORKER_TOKEN` 必須等於 Worker 的 `WORKER_SECRET`。設定 Worker URL 時，優先使用 Worker，不使用 `CF_API_TOKEN`。只將你自己信任的 HTTPS Worker URL 放入設定；逐字稿及 Worker secret 會送到該 URL。Worker 固定使用上述 Qwen 模型，不記錄請求內容；支援兩則 messages 的 POST JSON，回傳 `{"response":"潤飾文字"}`。支援 Cloudflare REST 的 `result.response`／`result.choices` 回應；完整 Qwen `<think>` 區塊會移除，不完整 reasoning 會拒絕貼上。
 
+## 2C. Sign in with ChatGPT：以 ChatGPT plan 潤飾
+
+官方文件明確列出合資格 **ChatGPT Plus／Pro** 用戶；**Go** 能否使用仍須以帳戶實際授權為準，這裡不保證所有 Go 帳戶合資格。用戶可透過官方 Sign in with ChatGPT（SIWC）授權此本機開源 app，以 ChatGPT 計劃處理合資格 **Responses API** 請求，潤飾毋須 `OPENAI_API_KEY`。可用性、模型、workspace 政策及額度以登入時的授權和 ChatGPT 顯示為準。Plus 與其他使用 ChatGPT plan 的 app 共用計劃額度，並非每個 app 另獲一份額度；不要將訂閱理解為無限 API。
+
+**STT 仍需獨立憑證。** SIWC 的計劃使用不支援 audio/transcriptions。預設 `chatgptSTT=groq`，以 `GROQ_API_KEY`／Keychain `Groq` 執行 Whisper；亦可明確選 `chatgptSTT=openai`，用 `OPENAI_API_KEY`／Keychain `OpenAI` 做轉錄（獨立 API billing）。不會自動跨供應商 fallback，亦不會將 SIWC token 用於 STT。
+
+1. 先啟動一次 app 建立 settings.plist，準備 Groq key（見 2B 或 Keychain 表格）。此模式不需要 Cloudflare 憑證。
+2. 修改設定，然後 menubar → **Reload settings**：
+
+   ```sh
+   plutil -replace backend -string chatgpt-plan "$HOME/Library/Application Support/typeless-alt/settings.plist"
+   # chatgptSTT 預設 groq，毋須新增欄位。若原先改過，請在 plist 改回 groq。
+   ```
+
+3. menubar → **Sign in with ChatGPT…**，在系統瀏覽器登入、選擇 workspace 並允許使用 ChatGPT plan。完成後回到 app；選單會顯示帳戶及註冊 ID 尾碼。登入等待最多五分鐘，期間暫停錄音。
+4. 在 TextEdit 按 ⌃⌥D 錄音、再按停止。音訊由 STT 服務轉錄，文字用 Bearer access token 呼叫公開 `https://api.openai.com/v1/responses` 潤飾。只有收到 `response.completed` 及非空文字才貼上；失敗／額度不足／中斷保留逐字稿，沒有付費 API fallback。
+
+`chatgptModel` 預設空字串：每次潤飾先讀取登入帳戶 `/v1/models`，使用第一個 `visibility=list` 的模型。可在 plist 明確填入該帳戶可用的 model **slug**；失效時會提示，不會改用其他付費路徑。Responses 固定 `store:false`、`stream:true`，不送 temperature 或不支援的 system message。
+
+選單可選擇已儲存的帳戶（登出後點選該列重新登入），或 **Add another ChatGPT account…**。每個註冊分開儲存；新登入通過 ID token 簽署、issuer、audience、expiry 及 nonce 驗證後才啟用；缺少計劃 scopes 時保留登入並標示 plan disabled，拒絕 inference，可再次登入啟用計劃權限。Authorization Code + PKCE S256 使用 `127.0.0.1` callback；首次 `dynamic_agent_client`／`agent_name_hint=Typeless Alt`，其後重用 issued client ID。穩定 `ext_agent_host_id`、註冊 metadata 及 access／refresh／ID tokens 都保存在本機 **Keychain service `typeless-alt.siwc`**，不寫入 plist、repo 或日誌。token 到期前更新，輪換 refresh token 一併儲存；app 使用本機 instance lock 防止同時啟動多個實例，避免輪換 refresh token 競爭。
+
+**Sign out** 會先嘗試撤銷目前帳戶的 renewable session，再清除該帳戶本機 tokens，保留 client／account 對應及 host ID 供下次登入；其他已儲存帳戶不受影響。若未確認遠端撤銷，app 會提示到 **ChatGPT Settings** disconnect。選單 **ChatGPT usage / manage access…** 開啟 ChatGPT Settings，請在 Usage 檢查額度及管理 app 存取。
+
+官方文件：[Quickstart](https://developers.openai.com/siwc/quickstart)、[開源 SIWC](https://developers.openai.com/siwc/token-sharing-open-source)、[整合範例](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)、[Responses 限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)。
+
 ## 3. Keychain（選用，避免每次 export）
 
 使用 macOS **Keychain Access／鑰匙圈存取** → login keychain → New Password Item／新增密碼項目（generic password）。下列名稱填在 Keychain Item Name／service；Account 可填自己的帳戶名稱，Password 填相應 secret：
@@ -111,7 +136,9 @@ Accessibility 允許送出貼上事件，但個別 app、網頁、遠端桌面�
 
 | key | 預設／用途 |
 | --- | --- |
-| `backend` | `openai` 或 `groq-cf` |
+| `backend` | `openai`、`groq-cf` 或 `chatgpt-plan` |
+| `chatgptSTT` | `groq`；ChatGPT plan 模式的 STT，可明確選 `openai` |
+| `chatgptModel` | 空字串：用登入帳戶首個可見模型；或指定可用 slug |
 | `keyCode` | `2` = ANSI D（實體鍵位）；`0` = A、`1` = S、`3` = F |
 | `modifiers` | `6144` = Control `4096` + Option `2048`；Shift `512`、Command `256` |
 | `transcriptionModel` | OpenAI `gpt-4o-transcribe` |
@@ -142,8 +169,10 @@ node worker/test.mjs  # 選用：需要 Node.js，僅本機 fixture 測試
 ./run.sh --build-only
 ```
 
-自動測試涵蓋舊設定遷移、後端值驗證、Cloudflare REST／Worker 回應及 Qwen reasoning 處理、語言／app 語氣提示。這些測試不發送 API 請求。實際端到端驗收：為兩個後端各自在 TextEdit 說「聽日，唔係，後日三點 send 個 email」，確認最終意思、繁體／英文、貼上；再測切換欄位後保留結果、取消錄音及 sounds=false。
+自動測試涵蓋舊設定遷移、後端值驗證、Cloudflare REST／Worker 回應及 Qwen reasoning 處理、語言／app 語氣提示。另測 SIWC 本機 loopback callback、PKCE、callback state／client 綁定、真實 RSA 簽署與錯誤 claims、Responses payload／完成與失敗事件、STT 設定驗證。這些測試不使用真實帳戶、不讀寫 Keychain、不發送付費 API 請求。實際端到端驗收：為所用後端各自在 TextEdit 說「聽日，唔係，後日三點 send 個 email」，確認最終意思、繁體／英文、貼上；再測切換欄位後保留結果、取消錄音及 sounds=false。
 
 本 repo 已在此 Apple Silicon Mac 完成 release 編譯。沒有使用你的付費 API、錄音或代授權系統權限；真實麥克風 → API → 目標 app 貼上仍須按以上步驟本機驗收。
 
 API 參考：[OpenAI audio](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)、[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[Groq STT](https://console.groq.com/docs/speech-to-text)、[Cloudflare Qwen](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/)。模型供應及免費額度可能變動，可透過設定更新。
+
+SIWC 手動驗收：登入後重開 app，確認 Keychain session 可延續；以 Groq STT + ChatGPT plan 完成一次 TextEdit 潤飾；取消瀏覽器授權應保留舊帳戶；再測帳戶切換、到期後更新、Sign out／重新登入及額度不足時不貼上。登入是用戶互動步驟；自動測試／release build 並不證明真實帳戶已授權或完成 inference。

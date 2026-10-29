@@ -5,6 +5,8 @@ import Carbon
 let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/typeless-alt", isDirectory: true)
 struct Settings: Codable {
     var backend = "openai"
+    var chatgptSTT = "groq"
+    var chatgptModel = "" // Empty: use the first visible account model.
     var groqModel = "whisper-large-v3"
     var cloudflareModel = "@cf/qwen/qwen3-30b-a3b-fp8"
     var cloudflareWorkerURL = ""
@@ -30,7 +32,7 @@ struct Settings: Codable {
         let merged = defaults.merging(stored) { _, new in new }
         let data = try PropertyListSerialization.data(fromPropertyList: merged, format: .xml, options: 0)
         let value = try PropertyListDecoder().decode(Settings.self, from: data)
-        guard ["openai", "groq-cf"].contains(value.backend), value.keyCode <= 127, value.modifiers != 0, (0...500).contains(value.historyLimit), !value.transcriptionModel.isEmpty, !value.polishModel.isEmpty else { throw Failure("Invalid settings values.") }
+        guard ["openai", "groq-cf", "chatgpt-plan"].contains(value.backend), ["groq", "openai"].contains(value.chatgptSTT), value.keyCode <= 127, value.modifiers != 0, (0...500).contains(value.historyLimit), !value.transcriptionModel.isEmpty, !value.polishModel.isEmpty else { throw Failure("Invalid settings values.") }
         return value
     }
 }
@@ -47,7 +49,7 @@ enum Credentials {
             var result: CFTypeRef?
             if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data, let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty { return key }
         }
-        throw Failure("Missing \(environment). Set it before ./run.sh or add a generic password in Keychain Access with service/name \(services.joined(separator: " or ")). ChatGPT Plus does not include API quota.")
+        throw Failure("Missing \(environment). Set it before ./run.sh or add a generic password in Keychain Access with service/name \(services.joined(separator: " or ")). ChatGPT plan sign-in covers eligible Responses only; STT still needs a Groq or OpenAI API key.")
     }
 }
 struct OpenAI {
@@ -130,6 +132,10 @@ struct DictationBackend {
         if settings.backend == "openai" {
             stt = OpenAI(key: try Credentials.key())
             cloudflareToken = nil; workerURL = nil; workerToken = nil
+        } else if settings.backend == "chatgpt-plan" {
+            if settings.chatgptSTT == "openai" { stt = OpenAI(key: try Credentials.key()) }
+            else { stt = OpenAI(key: try Credentials.key(environment: "GROQ_API_KEY", services: ["Groq"]), baseURL: "https://api.groq.com/openai/v1/", provider: "Groq") }
+            cloudflareToken = nil; workerURL = nil; workerToken = nil
         } else {
             stt = OpenAI(key: try Credentials.key(environment: "GROQ_API_KEY", services: ["Groq"]), baseURL: "https://api.groq.com/openai/v1/", provider: "Groq")
             let rawURL = ProcessInfo.processInfo.environment["CF_WORKER_URL"] ?? settings.cloudflareWorkerURL
@@ -147,9 +153,10 @@ struct DictationBackend {
         }
     }
     func transcribe(_ url: URL) async throws -> String {
-        try await stt.transcribe(url, model: settings.backend == "openai" ? settings.transcriptionModel : settings.groqModel)
+        try await stt.transcribe(url, model: (settings.backend == "openai" || (settings.backend == "chatgpt-plan" && settings.chatgptSTT == "openai")) ? settings.transcriptionModel : settings.groqModel)
     }
     func polish(_ text: String, bundleID: String) async throws -> String {
+        if settings.backend == "chatgpt-plan" { return try await ChatGPTPlan.shared.polish(text, model: settings.chatgptModel, bundleID: bundleID) }
         if settings.backend == "openai" { return try await stt.polish(text, model: settings.polishModel, bundleID: bundleID) }
         var messages = OpenAI.messages(text, bundleID: bundleID)
         messages[0]["content", default: ""] += "\n/no_think"

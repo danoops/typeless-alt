@@ -2,9 +2,13 @@ import AppKit
 import AVFoundation
 import ApplicationServices
 import Carbon
+import Darwin
 
 final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegate {
     var status: NSStatusItem!
+    var planAccounts = PlanStore()
+    var authenticating = false
+    var instanceLock: Int32 = -1
     var settings = Settings()
     var hotKey: EventHotKeyRef?
     var handler: EventHandlerRef?
@@ -22,9 +26,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        do {
+            try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            instanceLock = Darwin.open(support.appendingPathComponent("instance.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+            guard instanceLock >= 0, flock(instanceLock, LOCK_EX | LOCK_NB) == 0 else { throw Failure("Typeless Alt is already running, or its instance lock is unavailable.") }
+        } catch { alert(error.localizedDescription); NSApp.terminate(nil); return }
+
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         do { settings = try Settings.load(); try registerHotKey() } catch { alert(error.localizedDescription) }
         update("Idle")
+        refreshAccounts()
         if !AXIsProcessTrusted() {
             alert("Welcome to Typeless Alt. Enable Accessibility to paste dictation into other apps. Use the menu → Grant Accessibility, then enable Typeless Alt in System Settings. Microphone access is requested on your first recording. Audio and transcript are sent to the selected cloud providers using your credentials.")
         }
@@ -44,6 +55,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         add(menu, "Grant Accessibility…", #selector(accessibility))
         add(menu, "Open settings.plist…", #selector(openSettings))
         add(menu, "Reload settings", #selector(reload))
+        menu.addItem(.separator())
+        add(menu, "Sign in with ChatGPT…", #selector(signInChatGPT))
+        for profile in planAccounts.profiles {
+            let item = NSMenuItem(title: profile.label + (profile.accessToken == nil ? " (sign in again)" : profile.scopes.contains("chatgpt.tokens.use.direct") ? "" : " (plan disabled)"), action: #selector(selectChatGPT(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = profile.clientID
+            item.state = planAccounts.activeID == profile.clientID ? .on : .off
+            menu.addItem(item)
+        }
+        add(menu, "Add another ChatGPT account…", #selector(addChatGPT))
+        add(menu, "Sign out", #selector(signOutChatGPT))
+        add(menu, "ChatGPT usage / manage access…", #selector(chatGPTUsage))
         add(menu, "Open local data folder", #selector(openData))
         menu.addItem(.separator())
         add(menu, "Quit", #selector(quit))
@@ -74,9 +96,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         return (value as! AXUIElement)
     }
     @objc func toggle() {
-        guard !busy, !requesting else { return }
+        guard !busy, !requesting, !authenticating else { return }
         if recorder != nil { stop(); return }
         guard AXIsProcessTrusted() else { accessibility(); return }
+        if settings.backend == "chatgpt-plan", !planAccounts.profiles.contains(where: { $0.clientID == planAccounts.activeID && $0.accessToken != nil }) {
+            alert("Use menubar → Sign in with ChatGPT before recording."); return
+        }
         do { activeBackend = try DictationBackend(settings) } catch { alert(error.localizedDescription); return }
         let app = NSWorkspace.shared.frontmostApplication
         targetPID = app?.processIdentifier; targetBundle = app?.bundleIdentifier ?? ""
@@ -176,13 +201,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         _ = AXIsProcessTrustedWithOptions(options)
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
+    func refreshAccounts() {
+        Task { @MainActor in
+            do { planAccounts = try await ChatGPTPlan.shared.snapshot(); update(state) }
+            catch { alert(error.localizedDescription) }
+        }
+    }
+    func planAction(_ operation: @escaping () async throws -> Void) {
+        guard !busy, !requesting, recorder == nil, !authenticating else { return }
+        authenticating = true; update("ChatGPT…")
+        Task { @MainActor in
+            defer { authenticating = false; refreshAccounts(); update("Idle") }
+            do { try await operation() } catch { alert(error.localizedDescription) }
+        }
+    }
+    @objc func signInChatGPT() {
+        let client = planAccounts.activeID ?? (planAccounts.profiles.count == 1 ? planAccounts.profiles.first?.clientID : nil)
+        planAction { try await ChatGPTPlan.shared.signIn(clientID: client) }
+    }
+    @objc func addChatGPT() { planAction { try await ChatGPTPlan.shared.signIn() } }
+    @objc func selectChatGPT(_ sender: NSMenuItem) {
+        guard let client = sender.representedObject as? String else { return }
+        let signedIn = planAccounts.profiles.first { $0.clientID == client }?.accessToken != nil
+        planAction {
+            if signedIn { try await ChatGPTPlan.shared.select(client) }
+            else { try await ChatGPTPlan.shared.signIn(clientID: client) }
+        }
+    }
+    @objc func signOutChatGPT() { planAction { try await ChatGPTPlan.shared.signOut() } }
+    @objc func chatGPTUsage() { NSWorkspace.shared.open(URL(string: "https://chatgpt.com/settings/usage")!) }
     @objc func openSettings() { NSWorkspace.shared.open(Settings.url) }
     @objc func openData() { NSWorkspace.shared.open(support) }
     @objc func reload() {
-        guard recorder == nil, !busy else { return }
+        guard recorder == nil, !busy, !authenticating else { return }
         do { settings = try Settings.load(); try registerHotKey(); update("Idle — settings loaded") } catch { alert(error.localizedDescription) }
     }
-    @objc func quit() { guard !busy else { alert("Wait for processing to finish before quitting."); return }; cleanup(); NSApp.terminate(nil) }
+    @objc func quit() { guard !busy, !authenticating else { alert("Wait for processing to finish before quitting."); return }; cleanup(); NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) { cleanup() }
     func alert(_ message: String) {
         NSApp.activate(ignoringOtherApps: true)
