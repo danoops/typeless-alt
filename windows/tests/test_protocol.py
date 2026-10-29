@@ -100,10 +100,6 @@ class WindowsTests(unittest.TestCase):
         self.assertIsInstance(sounddevice.query_devices(), sounddevice.DeviceList)
         self.assertGreater(WinVaultKeyring.priority, 0)
 
-
-if __name__ == '__main__':
-    unittest.main()
-
 class SessionTests(unittest.TestCase):
     def test_refresh_rotation_saved_before_responses_without_paid_fallback(self):
         import time
@@ -140,3 +136,49 @@ class SessionTests(unittest.TestCase):
             siwc.save(fixture)
             self.assertEqual(siwc.read(), fixture)
             self.assertNotIn(b'fixture-only', (Path(d) / 'siwc.dpapi').read_bytes())
+
+class BrowserSignInTests(unittest.TestCase):
+    def test_real_loopback_pkce_and_signed_id_token(self):
+        import time
+        import threading
+        import urllib.request
+        from urllib.parse import urlsplit, parse_qs
+        import jwt
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        public = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private.public_key()))
+        public.update(kid='fixture-key', use='sig', alg='RS256')
+        captured = {}
+        callbacks = []
+        def browser(url):
+            query = parse_qs(urlsplit(url).query)
+            captured.update({k: v[0] for k, v in query.items()})
+            def visit():
+                with urllib.request.urlopen(captured['redirect_uri'] + '?state=' + captured['state'] + '&code=fixture&client_id=issued', timeout=5) as r:
+                    callbacks.append(r.status)
+            t = threading.Thread(target=visit)
+            t.start()
+            captured['thread'] = t
+            return True
+        def exchange(**fields):
+            self.assertEqual(siwc.challenge(fields['code_verifier']), captured['code_challenge'])
+            self.assertEqual(fields['client_id'], 'issued')
+            raw = jwt.encode(dict(iss=siwc.ISSUER, aud='issued', sub='fixture-user',
+                                  nonce=captured['nonce'], exp=time.time() + 300), private,
+                             algorithm='RS256', headers={'kid': 'fixture-key'})
+            return dict(access_token='fixture-access', refresh_token='fixture-refresh', id_token=raw,
+                        scope=siwc.SCOPES, expires_in=3600, token_type='Bearer')
+        jwks = MagicMock()
+        jwks.__enter__.return_value.json.return_value = {'keys': [public]}
+        with patch.object(siwc, 'read', return_value={}), patch.object(siwc, 'save') as save, patch.object(
+                siwc.webbrowser, 'open', side_effect=browser), patch.object(siwc, 'token', side_effect=exchange), patch.object(
+                siwc, 'request', return_value=jwks):
+            siwc.sign_in()
+            captured['thread'].join(5)
+            self.assertEqual(callbacks, [200])
+            self.assertEqual(captured['client_id'], 'dynamic_agent_client')
+            self.assertEqual(save.call_args.args[0]['subject'], 'fixture-user')
+
+
+if __name__ == '__main__':
+    unittest.main()
