@@ -1,0 +1,8 @@
+.build/
+build/
+.DS_Store
+.env
+*.m4a
+worker/.wrangler/
+worker/node_modules/
+worker/.dev.vars

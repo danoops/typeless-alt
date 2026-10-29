@@ -1,0 +1,9 @@
+name = "typeless-alt-polish"
+main = "index.js"
+compatibility_date = "2026-10-01"
+
+[ai]
+binding = "AI"
+
+[observability]
+enabled = false
