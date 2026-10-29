@@ -4,6 +4,18 @@
 
 **本機 app，不是離線 AI**：OpenAI 模式將音訊及逐字稿送到 OpenAI；groq-cf 將音訊送到 Groq、逐字稿送到 Cloudflare（或你指定的 Worker）；chatgpt-plan 將音訊送到所選 STT 服務（預設 Groq）、逐字稿送到 OpenAI Responses。無自建同步服務；歷史預設關閉。請只輸入願意交予所選服務處理的內容。
 
+## Windows 10/11 x64（PC125）
+
+新增獨立 Python tray port，Mac Swift app 保持不變。已裝 Git、Python 3.12 x64 的 PC：
+
+```powershell
+git clone https://github.com/danoops/typeless-alt.git
+cd typeless-alt
+.\windows\run.bat
+```
+
+一條 run 指令自動建立 venv／安裝依賴／啟動。預設 **Ctrl+Alt+D**；右鍵 tray 設定憑證及 backend。支援 OpenAI、Groq + Cloudflare、ChatGPT plan 瀏覽器 SIWC（STT 預設 Groq）。完整設定、限制、PC125 驗收：[windows/README.md](windows/README.md)。
+
 ## 1. 編譯／啟動
 
 需要 Xcode Command Line Tools（`swift --version`；未安裝可執行 `xcode-select --install`）。

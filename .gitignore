@@ -6,3 +6,6 @@ build/
 worker/.wrangler/
 worker/node_modules/
 worker/.dev.vars
+windows/.venv/
+__pycache__/
+*.pyc
